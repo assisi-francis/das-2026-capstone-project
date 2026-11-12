@@ -3,7 +3,7 @@
 // The API (Build 4) uses src/services/ and src/repositories/ instead. This file
 // stays for `npm run demo` and shares its input rules via validation.js.
 
-import { newId, referenceCode } from './ids.js';
+import { newId, newReference } from './ids.js';
 import { Queue } from './waitlistQueue.js';
 import { DomainError } from './errors.js';
 import { summarizeEvent } from './eventSearch.js';
@@ -21,6 +21,23 @@ export { MAX_TICKETS_PER_BOOKING, seatsLeft };
 
 // Bookings in these states are holding seats. A cancelled one is not.
 const HOLDS_SEATS = new Set(['pending', 'paid']);
+
+function requireObject(value, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DomainError('VALIDATION', `${label} must be an object`);
+  }
+  return value;
+}
+
+function requireStore(store) {
+  requireObject(store, 'store');
+  for (const key of ['events', 'tiers', 'bookings', 'bookingsByReference', 'waitlists']) {
+    if (!(store[key] instanceof Map)) {
+      throw new DomainError('VALIDATION', `store.${key} must be a Map`);
+    }
+  }
+  return store;
+}
 
 export function createStore() {
   return {
@@ -44,13 +61,20 @@ function getEvent(store, eventId) {
   return event;
 }
 
-export function createEvent(store, { title, city, venue = '', startsAt, organizerId }) {
+export function createEvent(store, input) {
+  requireStore(store);
+  const { title, city, venue = '', startsAt, organizerId } = requireObject(input, 'event');
+  if (venue !== undefined && typeof venue !== 'string') {
+    throw new DomainError('VALIDATION', 'Venue must be text');
+  }
+  const validatedOrganizerId = organizerId === undefined ? undefined : requireText(organizerId, 'Organizer');
+
   const event = {
     id: newId(),
-    organizerId,
+    organizerId: validatedOrganizerId,
     title: requireText(title, 'Title'),
     city: requireText(city, 'City'),
-    venue: String(venue).trim(),
+    venue: venue.trim(),
     startsAt: requireDate(startsAt, 'startsAt'),
     status: 'draft',
     tierIds: [],
@@ -59,15 +83,22 @@ export function createEvent(store, { title, city, venue = '', startsAt, organize
   return event;
 }
 
-export function addTier(store, eventId, { name, priceCents, capacity }) {
+export function addTier(store, eventId, input) {
+  requireStore(store);
+  requireText(eventId, 'eventId');
+  const { name, priceCents, capacity } = requireObject(input, 'tier');
   const event = getEvent(store, eventId);
 
+  const validatedPrice = requireWholeNumber(priceCents, 'priceCents', 0);
+  if (validatedPrice > Math.floor(Number.MAX_SAFE_INTEGER / MAX_TICKETS_PER_BOOKING)) {
+    throw new DomainError('VALIDATION', 'priceCents is too large to calculate a booking total safely');
+  }
   const tier = {
     id: newId(),
     eventId,
     name: requireText(name, 'Tier name'),
     // Money is ALWAYS whole cents. 0.1 + 0.2 !== 0.3 in floating point.
-    priceCents: requireWholeNumber(priceCents, 'priceCents', 0),
+    priceCents: validatedPrice,
     capacity: requireWholeNumber(capacity, 'capacity', 1),
     sold: 0,
   };
@@ -78,6 +109,8 @@ export function addTier(store, eventId, { name, priceCents, capacity }) {
 }
 
 export function publishEvent(store, eventId) {
+  requireStore(store);
+  requireText(eventId, 'eventId');
   const event = getEvent(store, eventId);
   if (event.tierIds.length === 0) {
     throw new DomainError('INVALID_STATE', 'Add at least one ticket tier before publishing');
@@ -87,44 +120,54 @@ export function publishEvent(store, eventId) {
 }
 
 // What the public event list is built from. Drafts are hidden unless asked for.
-export function listEventSummaries(store, { publishedOnly = true } = {}) {
+export function listEventSummaries(store, options = {}) {
+  requireStore(store);
+  const { publishedOnly = true } = requireObject(options, 'options');
+  if (typeof publishedOnly !== 'boolean') {
+    throw new DomainError('VALIDATION', 'publishedOnly must be a boolean');
+  }
   return [...store.events.values()]
     .filter((event) => !publishedOnly || event.status === 'published')
     .map((event) => summarizeEvent(event, event.tierIds.map((id) => store.tiers.get(id))));
 }
 
 export function bookTickets(store, tierId, userId, quantity) {
+  requireStore(store);
+  requireText(tierId, 'tierId');
+  const validatedUserId = requireText(userId, 'userId');
   const tier = getTier(store, tierId);
   requireQuantity(quantity);
   assertSeatsAvailable(tier, quantity);
 
-  tier.sold += quantity;
-
   let reference;
   do {
-    reference = referenceCode();
+    reference = newReference();
   } while (store.bookingsByReference.has(reference));
 
   const booking = {
     id: newId(),
     reference,
-    userId,
+    userId: validatedUserId,
     tierId,
     quantity,
     amountCents: tier.priceCents * quantity,
     status: 'pending',
     createdAt: new Date().toISOString(),
   };
+  tier.sold += quantity;
   store.bookings.set(booking.id, booking);
   store.bookingsByReference.set(reference, booking);
   return booking;
 }
 
 export function findBookingByReference(store, reference) {
-  return store.bookingsByReference.get(reference);
+  requireStore(store);
+  return store.bookingsByReference.get(requireText(reference, 'reference'));
 }
 
 export function cancelBooking(store, reference) {
+  requireStore(store);
+  requireText(reference, 'reference');
   const booking = findBookingByReference(store, reference);
   if (!booking) throw new DomainError('NOT_FOUND', 'Booking not found');
   if (!HOLDS_SEATS.has(booking.status)) {
@@ -136,19 +179,24 @@ export function cancelBooking(store, reference) {
 }
 
 export function joinWaitlist(store, tierId, userId, quantity) {
+  requireStore(store);
+  requireText(tierId, 'tierId');
+  const validatedUserId = requireText(userId, 'userId');
   const tier = getTier(store, tierId);
   requireQuantity(quantity);
   if (seatsLeft(tier) >= quantity) {
     throw new DomainError('NOT_SOLD_OUT', 'Seats are available, so book them instead');
   }
   const queue = store.waitlists.get(tierId);
-  queue.enqueue({ userId, quantity });
+  queue.enqueue({ userId: validatedUserId, quantity });
   return { position: queue.size };
 }
 
 // Strict first-in-first-out: only the person at the head of the line is considered.
 // Discussion question for class: what happens if the head wants 4 seats and only 1 is free?
 export function offerNextOnWaitlist(store, tierId) {
+  requireStore(store);
+  requireText(tierId, 'tierId');
   const tier = getTier(store, tierId);
   const queue = store.waitlists.get(tierId);
   const head = queue.peek();

@@ -13,15 +13,18 @@ export function requireText(value, field) {
 }
 
 export function requireWholeNumber(value, field, min) {
-  if (!Number.isInteger(value) || value < min) {
+  if (!Number.isSafeInteger(value) || value < min) {
     throw new DomainError('VALIDATION', `${field} must be a whole number of at least ${min}`);
   }
   return value;
 }
 
 export function requireDate(value, field) {
+  if (!(typeof value === 'string' || value instanceof Date)) {
+    throw new DomainError('VALIDATION', `${field} must be a valid date`);
+  }
   const date = new Date(value);
-  if (value === undefined || value === null || Number.isNaN(date.getTime())) {
+  if (Number.isNaN(date.getTime())) {
     throw new DomainError('VALIDATION', `${field} must be a valid date`);
   }
   return date.toISOString();
