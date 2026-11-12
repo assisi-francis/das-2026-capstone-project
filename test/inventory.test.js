@@ -41,8 +41,14 @@ describe('inventory', () => {
     it('rejects a missing title, a bad date and bad numbers', () => {
       throwsCode(() => createEvent(store, { title: ' ', city: 'x', startsAt: '2026-12-05' }), 'VALIDATION');
       throwsCode(() => createEvent(store, { title: 'x', city: 'x', startsAt: 'nope' }), 'VALIDATION');
+      throwsCode(() => createEvent(store, null), 'VALIDATION');
+      throwsCode(() => createEvent(store, { title: 'x', city: 'x', venue: 3, startsAt: '2026-12-05' }), 'VALIDATION');
       throwsCode(() => addTier(store, event.id, { name: 'x', priceCents: 19.99, capacity: 5 }), 'VALIDATION');
       throwsCode(() => addTier(store, event.id, { name: 'x', priceCents: 100, capacity: 0 }), 'VALIDATION');
+      throwsCode(
+        () => addTier(store, event.id, { name: 'x', priceCents: Number.MAX_SAFE_INTEGER, capacity: 5 }),
+        'VALIDATION',
+      );
     });
 
     it('cannot publish an event with no tiers', () => {
@@ -78,11 +84,19 @@ describe('inventory', () => {
       }
     });
 
+    it('validates the user before changing inventory or booking indexes', () => {
+      throwsCode(() => bookTickets(store, tier.id, ' ', 1), 'VALIDATION');
+      assert.equal(tier.sold, 0);
+      assert.equal(store.bookings.size, 0);
+      assert.equal(store.bookingsByReference.size, 0);
+    });
+
     it('finds a booking by its reference code', () => {
       const booking = bookTickets(store, tier.id, 'ada', 1);
       assert.match(booking.reference, /^[A-Z2-9]{8}$/);
       assert.equal(findBookingByReference(store, booking.reference), booking);
       assert.equal(findBookingByReference(store, 'NOPE0000'), undefined);
+      throwsCode(() => findBookingByReference(store, ' '), 'VALIDATION');
     });
   });
 
@@ -108,6 +122,12 @@ describe('inventory', () => {
       bookTickets(store, tier.id, 'bayo', 3);
       assert.deepEqual(joinWaitlist(store, tier.id, 'ada', 1), { position: 1 });
       assert.deepEqual(joinWaitlist(store, tier.id, 'chidi', 1), { position: 2 });
+    });
+
+    it('rejects an invalid user without adding a queue entry', () => {
+      bookTickets(store, tier.id, 'bayo', 3);
+      throwsCode(() => joinWaitlist(store, tier.id, ' ', 1), 'VALIDATION');
+      assert.deepEqual(store.waitlists.get(tier.id).toArray(), []);
     });
 
     it('offers seats first come, first served', () => {
